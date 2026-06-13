@@ -1,0 +1,24 @@
+{
+  "name": "article-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Instagram投稿(SociaVault) + Claude APIによる記事自動生成エンジン",
+  "scripts": {
+    "check-schema": "tsx scripts/check-schema.ts",
+    "generate": "tsx src/index.ts",
+    "migrate-images": "tsx src/scripts/migrate-images.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "dotenv": "^16.4.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
