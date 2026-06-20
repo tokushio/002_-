@@ -40,6 +40,23 @@ const ScoreInfoSchema = z.object({
   improvements: z.array(z.string()).describe("改善が必要な箇所の具体的な指摘"),
 });
 
+// 記事・商品で共通利用するカテゴリ語彙(アプリの RoomCategory と一致させること)
+const CATEGORY_VALUES = ["ldk", "washroom", "toilet", "exterior", "layout", "other"] as const;
+
+const MaterialSchema = z.object({
+  maker: z
+    .string()
+    .describe("メーカー・ブランド名(例: TOTO / LIXIL / Panasonic)。キャプション本文に実名で明記がある場合のみ"),
+  product_name: z
+    .string()
+    .describe("商品名・シリーズ名。明記がある場合のみ。無ければ空文字"),
+  model_number: z
+    .string()
+    .default("")
+    .describe("型番・品番。明記がある場合のみ。無ければ空文字。絶対に推測・捏造しない"),
+  category: z.enum(CATEGORY_VALUES).describe("この商品が使われる部位"),
+});
+
 const ArticleSchema = z.object({
   skip: z
     .boolean()
@@ -48,13 +65,31 @@ const ArticleSchema = z.object({
   skipReason: z.string().optional().describe("skipがtrueの場合、該当した理由"),
   title: z.string().describe("記事タイトル(30文字前後、検索を意識した自然な日本語)"),
   intro: z.string().describe("導入文(100〜150文字。記事の要点を伝えるリード)"),
-  category: z.string().describe("記事カテゴリ(短い日本語1語〜2語。例: 子育て、レシピ、住まい)"),
+  category: z
+    .enum(CATEGORY_VALUES)
+    .describe(
+      "記事カテゴリ。必ず次から最も適切なもの1つ: " +
+        "ldk(LDK/キッチン) / washroom(洗面・脱衣) / toilet(トイレ) / exterior(外観・外構) / " +
+        "layout(間取り・動線・回遊性など部屋をまたぐ計画) / other(上記に当てはまらない)。" +
+        "間取りや家事動線が主題の記事は必ず layout にする。",
+    ),
   tags: z.array(z.string()).describe("記事タグ(3〜6個。短い日本語)"),
   parts: z
     .array(z.string())
     .describe(
-      "記事本文のセクション配列(3〜6個)。各セクションは200〜400文字のまとまった段落。" +
-        "先頭に【見出し】の形でそのセクションの小見出しを付ける。",
+      "記事本文のセクション配列(3〜6個)。各セクションは次の形式の複数行文字列にする:\n" +
+        "・1行目: 【小見出し】\n" +
+        "・2〜4行目: 「・」で始まる“保存価値のある知識行”を2〜3行。住んだ後の気づき・施主の好み・選び方の基準を、" +
+        "単体で読んで意味が通る言い切り型で書く。「〜しよう」「〜で確認」「おすすめ」等のTODO・CTA表現は入れない。\n" +
+        "・最終行: 「→」で始まる“確認/体感アクション行”を1行だけ。モデルハウスや店頭で確かめる行動。\n" +
+        "①②③などの番号は一切使わない。",
+    ),
+  materials: z
+    .array(MaterialSchema)
+    .default([])
+    .describe(
+      "キャプション本文に実名で登場した建材・住宅設備・商品のみを構造化した配列。" +
+        "1つも明記がなければ空配列([])にする。メーカー名や型番を推測して埋めることは固く禁止する。",
     ),
   scoreInfo: ScoreInfoSchema.describe("生成した記事に対する自己評価"),
 });
@@ -121,16 +156,37 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 
 ---
 
-### ルール4：箇条書きの構成ルール
+### ルール4：箇条書きの構成ルール（保存価値の分離）
 
-各パーツは以下の順番で**3行のみ**出力すること。
-説明的なラベル（「リスク：」「解決策：」など）は一切付けない。
+各パーツは「保存できる知識行（・）」と「保存できないアクション行（→）」を明確に分けて出力する。
+番号（①②③）は一切使わない。説明ラベル（「リスク：」等）も付けない。
 
-| 行 | 内容 |
-|----|------|
-| **①** | そのパーツが伝える「核心的な価値」または「見落としがちな盲点・リスク」 |
-| **②** | 実現・解決・判断するための「具体的な数値・条件・基準・理由」。**元の記事に数値がない場合は「モデルハウスで実際に体感して確認すべきポイント」に置き換える。数値は絶対に捏造しない。** |
-| **③** | ユーザーが次に選ぶべき「具体的な行動・選択肢・チェック方法」 |
+| 記号 | 役割 | 行数 | 内容 |
+|------|------|------|------|
+| **・** | 保存対象（知識・好み・基準） | 2〜3行 | 単体で読んで意味が通る「住んだ後の気づき」「施主の好み」「選び方の基準」。**言い切り型**。 |
+| **→** | 保存対象外（アクション） | 1行（最後に1つ） | モデルハウス・店頭で体感／確認する行動。 |
+
+**「・」の行に入れてはいけない表現（これらは必ず「→」へ）：**
+「〜しよう」「〜で確認」「チェックしよう」「おすすめ」「体感しよう」などのTODO・CTA・行動指示。
+
+❌ 悪い例（保存しても意味が残らない）：
+・店頭でクッション性や厚みを実際に触って確認するのがおすすめ
+✅ 良い例（保存すると好み・基準として残る）：
+・クッション性タイプは食器に優しく、防虫・滑り止め効果もある
+
+数値・型番・メーカー名は**元のキャプションに明記がある場合のみ**使う。無い場合に推測・捏造することを固く禁止する。
+
+---
+
+### ルール4.5：商品・メーカー・型番の構造化抽出（materials）
+
+キャプション本文に**実名で登場した**建材・住宅設備・商品（例：メーカー名・シリーズ名・品番）は、
+本文（parts）に書くだけでなく materials 配列に構造化して必ず出力する。
+
+- メーカー名・型番が明記されていれば maker / model_number に入れる。
+- 商品名のみで型番が無ければ model_number は空文字にする（**推測しない**）。
+- キャプションに具体的な商品が1つも出てこない場合は materials を空配列にする。
+- **存在しないメーカー名・型番を絶対に創作しない。** これは施主に提示される情報であり、誤りは信頼を損なう。
 
 ---
 
@@ -166,26 +222,25 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 
 ---
 
-## 📤 出力形式
+## 📤 出力形式（各パーツの文字列イメージ）
 
 \\\`\\\`\\\`
-【タイトル】（30文字以内・施主の指が止まるタイトル）
-
 【パーツ1タイトル】
-① （核心的な価値 or 盲点・リスク）
-② （具体的な数値・条件・基準 / または体感確認ポイント）
-③ （次の具体的な行動・選択肢）
+・（保存価値のある知識／好み／基準。言い切り型）
+・（同上）
+→ （モデルハウス・店頭で確認する行動。1行のみ）
 
 【パーツ2タイトル】
-① 〜
-② 〜
-③ 〜
+・〜
+・〜
+→ 〜
 
 （以降、ルール3で定めたパーツ数まで繰り返す）
-
-【カテゴリー】ldk / washroom / toilet / exterior / other から1つ
-【タグ】家づくり検討者が検索しそうなキーワード3〜5個（#なし、カンマ区切り）
 \\\`\\\`\\\`
+
+- 【カテゴリー】ldk / washroom / toilet / exterior / layout / other から1つ（間取り・動線が主題なら layout）
+- 【タグ】家づくり検討者が検索しそうなキーワード3〜5個
+- 【materials】キャプションに実名で出た商品のみ（無ければ空）
 
 余計な前置き・挨拶・まとめ文は一切出力しないこと。
 
@@ -279,6 +334,7 @@ async function reviseArticle(
         category: draft.category,
         tags: draft.tags,
         parts: draft.parts,
+        materials: draft.materials,
       },
       null,
       2,
@@ -311,6 +367,7 @@ export async function generateArticle(
       category: result.category,
       tags: result.tags,
       parts: result.parts,
+      materials: result.materials,
       scoreInfo: result.scoreInfo,
     };
   }
@@ -333,6 +390,7 @@ export async function generateArticle(
     category: result.category,
     tags: result.tags,
     parts: result.parts,
+    materials: result.materials,
     scoreInfo: result.scoreInfo,
     beforeScore: revised ? beforeScore : undefined,
   };
