@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { generateArticle } from "./claude.js";
 import { articleExists, deleteArticle, fetchActiveScrapingRules, saveArticle, updateArticleThumbnail, updatePartImage } from "./db.js";
 import { fetchAllPosts, fetchComments, postUrlFromCode } from "./sociavault.js";
-import { saveCarouselImages } from "./storage.js";
+import { saveCarouselImages, deleteArticleImages } from "./storage.js";
 import { fetchThumbnailUrl } from "./unsplash.js";
 import type { InstagramComment } from "./types.js";
 
@@ -158,6 +158,7 @@ async function main() {
         console.error(`  ${err instanceof Error ? err.message : err}`);
         console.error(`  → DBに保存された記事データをロールバック(削除)します。`);
         await deleteArticle(articleId);
+        await deleteArticleImages(articleId);
         totalCreated--;
         totalSkipped++;
       }

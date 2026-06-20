@@ -62,3 +62,22 @@ export async function saveCarouselImages(
   }
   return results;
 }
+
+/**
+ * 記事に紐づくStorage画像(${articleId}/*)を一括削除する。
+ * 記事のロールバック時に、アップロード済みの孤児画像が残らないようにする。
+ */
+export async function deleteArticleImages(articleId: string): Promise<void> {
+  try {
+    const { data: files, error } = await client().storage.from(BUCKET).list(articleId);
+    if (error) throw error;
+    if (files && files.length > 0) {
+      const paths = files.map((f) => `${articleId}/${f.name}`);
+      await client().storage.from(BUCKET).remove(paths);
+    }
+  } catch (err) {
+    console.error(
+      `  Storage画像の削除に失敗 (article ${articleId}): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
