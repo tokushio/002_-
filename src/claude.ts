@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import type { GeneratedArticle, InstagramComment, InstagramPost } from "./types.js";
 
 /** スコアが この点未満の場合のみ、2回目の修正APIを呼ぶ(100点満点) */
-const SCORE_THRESHOLD = 80;
+export const SCORE_THRESHOLD = 80;
 
 const ScoreInfoSchema = z.object({
   articleType: z
@@ -99,9 +99,9 @@ const ArticleSchema = z.object({
   scoreInfo: ScoreInfoSchema.describe("生成した記事に対する自己評価"),
 });
 
-type ArticleWithScore = z.infer<typeof ArticleSchema>;
+export type ArticleWithScore = z.infer<typeof ArticleSchema>;
 
-const SYSTEM_PROMPT = `# 記事生成ルール v1.0
+export const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 ## 岡山の家づくり体感まとめ — コンテンツディレクター指示書
 
 ---
@@ -314,7 +314,7 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 「生成前チェック」に1つでも該当する場合は、skip: true, skipReason: "理由" を返してください。
 その場合は他のフィールド(title / intro / category / tags / parts / scoreInfo)は空で構いません。`;
 
-const REVISION_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+export const REVISION_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
 
 ---
 1回目に生成した記事の採点結果、改善が必要な点が指摘されました。
@@ -334,7 +334,16 @@ const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/we
  * カルーセル画像URLをサーバー側でfetchしてbase64の画像ブロックに変換する。
  * 取得失敗した画像はスキップする。最大 MAX_VISION_IMAGES 枚。
  */
-async function fetchImageBlocks(urls: string[]): Promise<Anthropic.ImageBlockParam[]> {
+/** 投稿のvision入力に使う画像URL一覧(カルーセル優先、無ければカバー1枚)。 */
+export function imageUrlsForPost(post: InstagramPost): string[] {
+  return post.carouselUrls?.length
+    ? post.carouselUrls
+    : post.display_uri
+      ? [post.display_uri]
+      : [];
+}
+
+export async function fetchImageBlocks(urls: string[]): Promise<Anthropic.ImageBlockParam[]> {
   const blocks: Anthropic.ImageBlockParam[] = [];
   for (const url of urls.slice(0, MAX_VISION_IMAGES)) {
     try {
@@ -370,23 +379,23 @@ export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[
   ].join("\n");
 }
 
-async function requestArticle(
+/**
+ * messages.create / batches.create 共通のリクエスト本体を構築する。
+ * 思考トークンは出力扱いで課金されコストを左右するため、モデルごとに最適化する:
+ *  - Haiku系: adaptive非対応のため thinking 無効
+ *  - Opus/Sonnet: adaptive。GEN_EFFORT(low/medium/high)で思考量=コストを調整可
+ * これを逐次パス(requestArticle)とBatchパスの両方で使うことで挙動を一致させる。
+ */
+export function buildRequestBody(
   system: string,
   userPrompt: string,
   images: Anthropic.ImageBlockParam[] = [],
-): Promise<ArticleWithScore> {
-  client ??= new Anthropic({ apiKey: config.anthropicApiKey });
-
+): Anthropic.MessageCreateParamsNonStreaming {
   const content: Anthropic.ContentBlockParam[] = [{ type: "text", text: userPrompt }, ...images];
-
-  // 思考トークンは出力扱いで課金されコストを大きく左右する。
-  // 記事抽出は深い推論を要さないため、モデルごとに思考を最適化する:
-  //  - Haiku系: adaptive非対応のため thinking 無効
-  //  - Opus/Sonnet: adaptive。GEN_EFFORT(low/medium/high)で思考量=コストを調整可
   const isHaiku = config.genModel.startsWith("claude-haiku");
   const effort = !isHaiku && process.env.GEN_EFFORT ? process.env.GEN_EFFORT : undefined;
 
-  const response = await client.messages.parse({
+  return {
     model: config.genModel,
     max_tokens: 16000,
     thinking: isHaiku ? { type: "disabled" } : { type: "adaptive" },
@@ -396,7 +405,26 @@ async function requestArticle(
       format: zodOutputFormat(ArticleSchema),
       ...(effort ? { effort: effort as "low" | "medium" | "high" | "max" } : {}),
     },
-  });
+  } as Anthropic.MessageCreateParamsNonStreaming;
+}
+
+/** Batch結果の生メッセージから構造化記事(ArticleWithScore)を取り出す。 */
+export function parseArticleMessage(message: Anthropic.Message): ArticleWithScore {
+  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === "text");
+  if (!textBlock) {
+    throw new Error(`Batch結果にテキストブロックがありません (stop_reason: ${message.stop_reason})`);
+  }
+  return ArticleSchema.parse(JSON.parse(textBlock.text));
+}
+
+async function requestArticle(
+  system: string,
+  userPrompt: string,
+  images: Anthropic.ImageBlockParam[] = [],
+): Promise<ArticleWithScore> {
+  client ??= new Anthropic({ apiKey: config.anthropicApiKey });
+
+  const response = await client.messages.parse(buildRequestBody(system, userPrompt, images));
 
   if (process.env.LOG_USAGE === "true") {
     console.error(`USAGE[${config.genModel}] ` + JSON.stringify(response.usage));
@@ -416,13 +444,9 @@ export async function generateAndScore(
   return requestArticle(SYSTEM_PROMPT, userPrompt, images);
 }
 
-/** 2回目のAPI呼び出し(スコアが低い場合のみ): 採点結果をもとに記事を修正する */
-async function reviseArticle(
-  userPrompt: string,
-  draft: ArticleWithScore,
-  images: Anthropic.ImageBlockParam[] = [],
-): Promise<ArticleWithScore> {
-  const revisionPrompt = [
+/** 修正(2回目)用のユーザープロンプトを構築する(逐次/Batch共通)。 */
+export function buildRevisionPrompt(userPrompt: string, draft: ArticleWithScore): string {
+  return [
     userPrompt,
     "",
     "## 1回目の生成結果(修正前)",
@@ -445,8 +469,15 @@ async function reviseArticle(
     "改善が必要な箇所:",
     ...draft.scoreInfo.improvements.map((item) => `- ${item}`),
   ].join("\n");
+}
 
-  return requestArticle(REVISION_SYSTEM_PROMPT, revisionPrompt, images);
+/** 2回目のAPI呼び出し(スコアが低い場合のみ): 採点結果をもとに記事を修正する */
+async function reviseArticle(
+  userPrompt: string,
+  draft: ArticleWithScore,
+  images: Anthropic.ImageBlockParam[] = [],
+): Promise<ArticleWithScore> {
+  return requestArticle(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(userPrompt, draft), images);
 }
 
 export async function generateArticle(
@@ -456,12 +487,7 @@ export async function generateArticle(
   const userPrompt = buildUserPrompt(post, comments);
 
   // カルーセル画像(最大6枚)をvision入力として取得。画像内の寸法・型番を読み取らせる。
-  const imageUrls = post.carouselUrls?.length
-    ? post.carouselUrls
-    : post.display_uri
-      ? [post.display_uri]
-      : [];
-  const images = await fetchImageBlocks(imageUrls);
+  const images = await fetchImageBlocks(imageUrlsForPost(post));
   if (images.length > 0) {
     console.log(`  画像 ${images.length} 枚をvision入力に追加`);
   }
@@ -469,17 +495,7 @@ export async function generateArticle(
   let result = await generateAndScore(userPrompt, images);
 
   if (result.skip) {
-    return {
-      skip: true,
-      skipReason: result.skipReason,
-      title: result.title,
-      intro: result.intro,
-      category: result.category,
-      tags: result.tags,
-      parts: result.parts,
-      materials: result.materials,
-      scoreInfo: result.scoreInfo,
-    };
+    return toGeneratedArticle(result);
   }
 
   const beforeScore = result.scoreInfo.total;
@@ -493,8 +509,17 @@ export async function generateArticle(
     console.log(`  修正後の採点結果: ${result.scoreInfo.total}点/100点`);
   }
 
+  return toGeneratedArticle(result, revised ? beforeScore : undefined);
+}
+
+/** ArticleWithScore(zod出力) を保存用の GeneratedArticle に変換する(逐次/Batch共通)。 */
+export function toGeneratedArticle(
+  result: ArticleWithScore,
+  beforeScore?: number,
+): GeneratedArticle {
   return {
-    skip: false,
+    skip: result.skip,
+    skipReason: result.skipReason,
     title: result.title,
     intro: result.intro,
     category: result.category,
@@ -502,6 +527,6 @@ export async function generateArticle(
     parts: result.parts,
     materials: result.materials,
     scoreInfo: result.scoreInfo,
-    beforeScore: revised ? beforeScore : undefined,
+    beforeScore,
   };
 }

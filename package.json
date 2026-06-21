@@ -7,6 +7,7 @@
   "scripts": {
     "check-schema": "tsx scripts/check-schema.ts",
     "generate": "tsx src/index.ts",
+    "generate:batch": "tsx src/batch-generate.ts",
     "migrate-images": "tsx src/scripts/migrate-images.ts",
     "typecheck": "tsc --noEmit"
   },
