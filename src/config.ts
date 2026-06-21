@@ -24,6 +24,14 @@ export const config = {
   get anthropicApiKey() {
     return required("ANTHROPIC_API_KEY");
   },
+  /**
+   * 記事生成に使うClaudeモデル。既定は最高品質の claude-opus-4-8。
+   * コスト最適化の品質テスト用に GEN_MODEL で切替可能
+   * (例: claude-sonnet-4-6 / claude-haiku-4-5)。
+   */
+  get genModel() {
+    return process.env.GEN_MODEL ?? "claude-opus-4-8";
+  },
   get sociavaultApiKey() {
     return required("SOCIAVAULT_API_KEY");
   },

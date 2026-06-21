@@ -379,15 +379,28 @@ async function requestArticle(
 
   const content: Anthropic.ContentBlockParam[] = [{ type: "text", text: userPrompt }, ...images];
 
+  // 思考トークンは出力扱いで課金されコストを大きく左右する。
+  // 記事抽出は深い推論を要さないため、モデルごとに思考を最適化する:
+  //  - Haiku系: adaptive非対応のため thinking 無効
+  //  - Opus/Sonnet: adaptive。GEN_EFFORT(low/medium/high)で思考量=コストを調整可
+  const isHaiku = config.genModel.startsWith("claude-haiku");
+  const effort = !isHaiku && process.env.GEN_EFFORT ? process.env.GEN_EFFORT : undefined;
+
   const response = await client.messages.parse({
-    model: "claude-opus-4-8",
+    model: config.genModel,
     max_tokens: 16000,
-    thinking: { type: "adaptive" },
+    thinking: isHaiku ? { type: "disabled" } : { type: "adaptive" },
     system,
     messages: [{ role: "user", content }],
-    output_config: { format: zodOutputFormat(ArticleSchema) },
+    output_config: {
+      format: zodOutputFormat(ArticleSchema),
+      ...(effort ? { effort: effort as "low" | "medium" | "high" | "max" } : {}),
+    },
   });
 
+  if (process.env.LOG_USAGE === "true") {
+    console.error(`USAGE[${config.genModel}] ` + JSON.stringify(response.usage));
+  }
   const result = response.parsed_output;
   if (!result) {
     throw new Error(`記事の生成に失敗しました (stop_reason: ${response.stop_reason})`);
