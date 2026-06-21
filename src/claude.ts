@@ -20,7 +20,7 @@ const ScoreInfoSchema = z.object({
       .describe("情報の具体性(0〜20点)。建材・サイズ・メーカーなど具体的な情報があるか"),
     cta: z
       .number()
-      .describe("CTA(0〜20点)。モデルハウス訪問・スクラップなど次のアクションを促しているか"),
+      .describe("CTA節度(0〜20点)。「→」アクション行が0〜1個に収まり、全パーツに繰り返していないか。多用は減点"),
   }),
   dynamicScores: z
     .array(
@@ -46,10 +46,10 @@ const CATEGORY_VALUES = ["ldk", "washroom", "toilet", "exterior", "layout", "oth
 const MaterialSchema = z.object({
   maker: z
     .string()
-    .describe("メーカー・ブランド名(例: TOTO / LIXIL / Panasonic)。キャプション本文に実名で明記がある場合のみ"),
+    .describe("メーカー・ブランド名(例: TOTO / LIXIL / Panasonic / ニトリ)。キャプションに明記がある場合のみ。無ければ空文字(推測しない)"),
   product_name: z
     .string()
-    .describe("商品名・シリーズ名。明記がある場合のみ。無ければ空文字"),
+    .describe("商品名・アイテム名(例: 調理台シート / 滑らないハンガー)。キャプションに具体名で登場すれば、メーカー不明でも必ず入れる"),
   model_number: z
     .string()
     .default("")
@@ -79,17 +79,22 @@ const ArticleSchema = z.object({
     .describe(
       "記事本文のセクション配列(3〜6個)。各セクションは次の形式の複数行文字列にする:\n" +
         "・1行目: 【小見出し】\n" +
-        "・2〜4行目: 「・」で始まる“保存価値のある知識行”を2〜3行。住んだ後の気づき・施主の好み・選び方の基準を、" +
+        "・「・」で始まる“保存価値のある知識行”を1〜3行。住んだ後の気づき・施主の好み・選び方の基準を、" +
         "単体で読んで意味が通る言い切り型で書く。「〜しよう」「〜で確認」「おすすめ」等のTODO・CTA表現は入れない。\n" +
-        "・最終行: 「→」で始まる“確認/体感アクション行”を1行だけ。モデルハウスや店頭で確かめる行動。\n" +
+        "  ★行数を埋めるために、キャプションに無い効能・数値・具体策を創作して水増しすることを固く禁止する。" +
+        "実質のある内容が1行しかなければ1行でよい。\n" +
+        "・「→」で始まる確認/体感アクション行は任意。付けるとしても記事全体で最大1回まで(全パーツに付けない)。" +
+        "本当に役立つ確認が無ければ付けない。\n" +
         "①②③などの番号は一切使わない。",
     ),
   materials: z
     .array(MaterialSchema)
     .default([])
     .describe(
-      "キャプション本文に実名で登場した建材・住宅設備・商品のみを構造化した配列。" +
-        "1つも明記がなければ空配列([])にする。メーカー名や型番を推測して埋めることは固く禁止する。",
+      "キャプションに具体名で登場した建材・住宅設備・商品・アイテムを構造化した配列。" +
+        "メーカー名が無くても、商品名・アイテム名が具体的に挙がっていれば全て含める(maker/modelは空でよい)。" +
+        "特に『N選』『1.〜 2.〜』等の列挙がある場合は、列挙された全アイテムをここに入れる。" +
+        "ただしメーカー名・型番を推測して創作することは固く禁止する。商品が一切無ければ空配列。",
     ),
   scoreInfo: ScoreInfoSchema.describe("生成した記事に対する自己評価"),
 });
@@ -107,6 +112,21 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 全国の住宅・インテリア系Instagramキャプションを元に、
 岡山・倉敷エリアで家づくりを検討する30〜40代施主向けに
 **スマートフォンで5秒で読めるノウハウ記事**を生成します。
+
+---
+
+## 🖼️ 最重要：画像内の情報を一次情報として読む
+
+この投稿のカルーセル画像（最大6枚）を添付します。
+**多くのリールは、肝心の情報（寸法・数値・型番・メーカー・商品名・間取りの数字）を
+キャプションではなく画像内のテキストに焼き込んでいます。**
+
+- **画像に書かれた具体的な数値（例：キッチン高さ86cm、通路幅105cm、洗面79cm）を
+  最優先で読み取り、記事本文（parts）の知識行とmaterialsに正確に反映する。**
+- キャプションが「寸法を紹介するね」程度しか無くても、画像に具体情報があればそれが本体。
+  画像を読まずに一般論でお茶を濁すことを禁止する。
+- ただし**画像から読み取れない数値・型番を推測して創作してはならない**（読めたものだけ転記）。
+- 画像内の文字が読めない／情報が無い場合のみ、キャプション本文を頼りにする。
 
 ---
 
@@ -140,7 +160,7 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 ### ルール2：スマホUI最適化（5秒ルール）
 
 - 長文の塊（文字の壁）は**完全に禁止**
-- 1パーツの構成：**【タイトル】＋【箇条書き①②③】のみ**
+- 1パーツの構成：**【タイトル】＋「・」知識行(1〜3)**（＋必要なら記事全体で1つの「→」）
 - 接続詞・前置き・まとめ文は極限まで削る
 - 体言止めを積極的に使う
 
@@ -150,23 +170,44 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 
 | 条件 | 対応 |
 |------|------|
-| 元の記事が1〜2パーツ | **最低3パーツになるよう補完**（元の内容を深掘りして追加） |
+| 元の内容が薄い（1〜2テーマ） | **無理に3パーツへ水増ししない**。実質のあるテーマ数だけ作る（最小2パーツ可） |
 | 元の記事が3〜6パーツ | **そのまま維持**（増減しない） |
 | 元の記事が7パーツ以上 | **重要度順に6パーツに絞る** |
+
+⚠️ キャプションが「保存してね」等の前置きだけで中身が薄い場合、
+**一般論を創作してパーツ数や行数を埋めてはならない**。書けることが少なければ少ないまま正直に出す。
+
+---
+
+### ルール3.5：列挙(N選・番号リスト)は全項目を保持する
+
+キャプションに「◯◯10選」「1.〜 2.〜 3.〜」のような**番号付き・列挙のリスト**がある場合:
+
+- 列挙された**全アイテムを1つも落とさず**本文に反映する（テーマ別にまとめてもよいが、全項目に触れる）。
+- 列挙された全アイテムを **materials 配列にも入れる**（メーカー不明でも product_name を入れる）。
+- タイトルに数字を入れる場合（例「10選」）、その数字は**本文で実際に扱ったアイテム数と一致**させる。
+  扱えるのが9個なら「9選」にする。**実際より多い数字を掲げない**。
 
 ---
 
 ### ルール4：箇条書きの構成ルール（保存価値の分離）
 
-各パーツは「保存できる知識行（・）」と「保存できないアクション行（→）」を明確に分けて出力する。
+各パーツは「保存できる知識行（・）」と「保存できないアクション行（→）」を分けて出力する。
 番号（①②③）は一切使わない。説明ラベル（「リスク：」等）も付けない。
 
 | 記号 | 役割 | 行数 | 内容 |
 |------|------|------|------|
-| **・** | 保存対象（知識・好み・基準） | 2〜3行 | 単体で読んで意味が通る「住んだ後の気づき」「施主の好み」「選び方の基準」。**言い切り型**。 |
-| **→** | 保存対象外（アクション） | 1行（最後に1つ） | モデルハウス・店頭で体感／確認する行動。 |
+| **・** | 保存対象（知識・好み・基準） | **1〜3行（実質に応じて可変）** | 単体で読んで意味が通る「住んだ後の気づき」「施主の好み」「選び方の基準」。**言い切り型**。 |
+| **→** | 保存対象外（アクション） | **記事全体で0〜1回のみ** | モデルハウス・店頭で体感／確認する行動。本当に有用な時だけ1つ。 |
 
-**「・」の行に入れてはいけない表現（これらは必ず「→」へ）：**
+**行数の水増し禁止**：3行に揃えるために、キャプションに無い効能・数値・具体策を創作してはならない。
+実質のある内容が1行ならその1行だけにする。
+
+**「→」アクション行の濫用禁止**：以前は全パーツに「モデルハウスで体感」を付けていたが、
+**繰り返しは価値が低く施主にとって邪魔**。→ は記事全体で**最大1つ**、置くなら最も自然なパーツの末尾に1回だけ。
+付ける価値が無ければ0個でよい。
+
+**「・」の行に入れてはいけない表現（入れるなら唯一の「→」へ）：**
 「〜しよう」「〜で確認」「チェックしよう」「おすすめ」「体感しよう」などのTODO・CTA・行動指示。
 
 ❌ 悪い例（保存しても意味が残らない）：
@@ -180,12 +221,15 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 
 ### ルール4.5：商品・メーカー・型番の構造化抽出（materials）
 
-キャプション本文に**実名で登場した**建材・住宅設備・商品（例：メーカー名・シリーズ名・品番）は、
+キャプションに**具体名で登場した**建材・住宅設備・商品・アイテムは、
 本文（parts）に書くだけでなく materials 配列に構造化して必ず出力する。
 
-- メーカー名・型番が明記されていれば maker / model_number に入れる。
-- 商品名のみで型番が無ければ model_number は空文字にする（**推測しない**）。
-- キャプションに具体的な商品が1つも出てこない場合は materials を空配列にする。
+- **メーカー名が無くても、商品名・アイテム名が具体的に挙がっていれば必ず入れる**（maker は空文字でよい）。
+  例：「調理台シート」「滑らないハンガー」「スターフィルター」など一般名でも product_name に入れる。
+- メーカー名・型番が明記されていれば maker / model_number に入れる。無ければ空文字（**推測しない**）。
+- **『N選』『1.〜 2.〜』の列挙がある投稿は、列挙された全アイテムを materials に入れる**
+  （このリスト＝施主が興味を持った商品であり、工務店への商談支援データとして最重要）。
+- キャプションに具体的な商品・アイテムが1つも出てこない場合のみ materials を空配列にする。
 - **存在しないメーカー名・型番を絶対に創作しない。** これは施主に提示される情報であり、誤りは信頼を損なう。
 
 ---
@@ -193,23 +237,21 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 ### ルール5：体感・暮らし視点の維持
 
 このメディアの核心は「住んだらどう感じるか」。
-以下の視点を必ず1つ以上のパーツに含めること。
+**知識行（・）の中に**以下の視点を自然に織り込むこと（行動指示としてではなく、気づき・基準として）。
 
 - 実際に住んだときの感覚・気づき
-- モデルハウスで体感すべきポイント
 - 後悔しないための比較・チェック視点
 - 数値や条件ではなく「体で感じる」描写
 
+※「モデルハウスで体感しよう」といった行動喚起は知識行に書かず、必要なら唯一の「→」行に集約する。
+
 ---
 
-### ルール6：ローカル文脈の自然な挿入
+### ルール6：ローカル文脈の挿入は控えめに
 
-キャプションの内容が岡山・倉敷エリアに関係なくても、
-以下のように自然にローカル文脈を加えること。
-
-- 「岡山・倉敷のモデルハウスで確認できます」
-- 「岡山エリアで人気のスタイルです」
-- 強引な挿入はしない。1記事に1回まで。
+岡山・倉敷のローカル文脈（「岡山のモデルハウスで確認できます」等）は、
+**入れるとしても記事全体で1回まで**、かつ唯一の「→」行に置く。
+自然に置けないなら**入れなくてよい**（毎記事に機械的に入れない）。
 
 ---
 
@@ -227,20 +269,22 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 \\\`\\\`\\\`
 【パーツ1タイトル】
 ・（保存価値のある知識／好み／基準。言い切り型）
-・（同上）
-→ （モデルハウス・店頭で確認する行動。1行のみ）
+・（同上。実質があれば最大3行。無理に増やさない）
 
 【パーツ2タイトル】
 ・〜
 ・〜
-→ 〜
 
-（以降、ルール3で定めたパーツ数まで繰り返す）
+【パーツ3タイトル】
+・〜
+→ （記事全体で1回だけ置ける任意のアクション行。不要なら付けない）
 \\\`\\\`\\\`
+
+※「→」行は上のように**記事全体で最大1つ**。全パーツには付けない。各パーツの「・」は1〜3行で可変。
 
 - 【カテゴリー】ldk / washroom / toilet / exterior / layout / other から1つ（間取り・動線が主題なら layout）
 - 【タグ】家づくり検討者が検索しそうなキーワード3〜5個
-- 【materials】キャプションに実名で出た商品のみ（無ければ空）
+- 【materials】キャプションに具体名で出た商品・アイテム（メーカー無しでも商品名で。列挙は全項目。無ければ空）
 
 余計な前置き・挨拶・まとめ文は一切出力しないこと。
 
@@ -253,14 +297,14 @@ const SYSTEM_PROMPT = `# 記事生成ルール v1.0
 | 項目 | 配点 | チェック内容 |
 |------|------|-------------|
 | UIノイズなし | 20点 | アカウント名・タイトルの繰り返しがないか |
-| 5秒ルール | 20点 | 各パーツが箇条書き3行に収まっているか |
-| 体感視点 | 20点 | 「住んだらどう感じるか」の描写が1つ以上あるか |
-| CTA | 20点 | 最後のパーツにモデルハウス訪問・体感を促す行動があるか |
-| 数値の誠実さ | 20点 | 数値を捏造していないか |
+| 5秒ルール | 20点 | 各パーツの「・」が1〜3行で簡潔か（水増しが無いか） |
+| 体感視点 | 20点 | 「住んだらどう感じるか」の描写が知識行に1つ以上あるか |
+| CTA節度 | 20点 | 「→」アクションが**0〜1個に収まっているか**（全パーツに付けて繰り返していないか） |
+| 誠実さ | 20点 | 数値・メーカー・型番・効能を**キャプションに無いのに創作していないか** |
 
 ---
 
-*バージョン：v1.0 / 最終更新：2026年6月*
+*バージョン：v1.1 / 最終更新：2026年6月（行数可変・CTA節度・列挙保持・商品名抽出）*
 
 ---
 
@@ -280,11 +324,43 @@ const REVISION_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
 
 let client: Anthropic | undefined;
 
+/** 記事生成時にClaudeへ渡すカルーセル画像の最大枚数(コスト対策) */
+const MAX_VISION_IMAGES = 6;
+
+/** Claude vision が受け付ける画像MIMEタイプ */
+const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/**
+ * カルーセル画像URLをサーバー側でfetchしてbase64の画像ブロックに変換する。
+ * 取得失敗した画像はスキップする。最大 MAX_VISION_IMAGES 枚。
+ */
+async function fetchImageBlocks(urls: string[]): Promise<Anthropic.ImageBlockParam[]> {
+  const blocks: Anthropic.ImageBlockParam[] = [];
+  for (const url of urls.slice(0, MAX_VISION_IMAGES)) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const rawType = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+      const mediaType = (SUPPORTED_IMAGE_TYPES.includes(rawType) ? rawType : "image/jpeg") as
+        | "image/jpeg"
+        | "image/png"
+        | "image/gif"
+        | "image/webp";
+      const data = Buffer.from(await res.arrayBuffer()).toString("base64");
+      blocks.push({ type: "image", source: { type: "base64", media_type: mediaType, data } });
+    } catch {
+      // 1枚の取得失敗は無視して続行
+    }
+  }
+  return blocks;
+}
+
 export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[]): string {
   const commentLines = comments.map((c) => `- @${c.user.username}: ${c.text}`).join("\n");
 
   return [
     "次のInstagram投稿をもとに記事を作成してください。",
+    "添付画像がある場合は、画像内に書かれた寸法・数値・型番・メーカー・商品名を最優先で読み取ること。",
     "",
     "## キャプション",
     post.caption?.text ?? "(キャプションなし)",
@@ -294,15 +370,21 @@ export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[
   ].join("\n");
 }
 
-async function requestArticle(system: string, userPrompt: string): Promise<ArticleWithScore> {
+async function requestArticle(
+  system: string,
+  userPrompt: string,
+  images: Anthropic.ImageBlockParam[] = [],
+): Promise<ArticleWithScore> {
   client ??= new Anthropic({ apiKey: config.anthropicApiKey });
+
+  const content: Anthropic.ContentBlockParam[] = [{ type: "text", text: userPrompt }, ...images];
 
   const response = await client.messages.parse({
     model: "claude-opus-4-8",
     max_tokens: 16000,
     thinking: { type: "adaptive" },
     system,
-    messages: [{ role: "user", content: userPrompt }],
+    messages: [{ role: "user", content }],
     output_config: { format: zodOutputFormat(ArticleSchema) },
   });
 
@@ -314,14 +396,18 @@ async function requestArticle(system: string, userPrompt: string): Promise<Artic
 }
 
 /** 1回目のAPI呼び出し: 記事生成 + 自己採点を同時に行う */
-export async function generateAndScore(userPrompt: string): Promise<ArticleWithScore> {
-  return requestArticle(SYSTEM_PROMPT, userPrompt);
+export async function generateAndScore(
+  userPrompt: string,
+  images: Anthropic.ImageBlockParam[] = [],
+): Promise<ArticleWithScore> {
+  return requestArticle(SYSTEM_PROMPT, userPrompt, images);
 }
 
 /** 2回目のAPI呼び出し(スコアが低い場合のみ): 採点結果をもとに記事を修正する */
 async function reviseArticle(
   userPrompt: string,
   draft: ArticleWithScore,
+  images: Anthropic.ImageBlockParam[] = [],
 ): Promise<ArticleWithScore> {
   const revisionPrompt = [
     userPrompt,
@@ -347,7 +433,7 @@ async function reviseArticle(
     ...draft.scoreInfo.improvements.map((item) => `- ${item}`),
   ].join("\n");
 
-  return requestArticle(REVISION_SYSTEM_PROMPT, revisionPrompt);
+  return requestArticle(REVISION_SYSTEM_PROMPT, revisionPrompt, images);
 }
 
 export async function generateArticle(
@@ -356,7 +442,18 @@ export async function generateArticle(
 ): Promise<GeneratedArticle> {
   const userPrompt = buildUserPrompt(post, comments);
 
-  let result = await generateAndScore(userPrompt);
+  // カルーセル画像(最大6枚)をvision入力として取得。画像内の寸法・型番を読み取らせる。
+  const imageUrls = post.carouselUrls?.length
+    ? post.carouselUrls
+    : post.display_uri
+      ? [post.display_uri]
+      : [];
+  const images = await fetchImageBlocks(imageUrls);
+  if (images.length > 0) {
+    console.log(`  画像 ${images.length} 枚をvision入力に追加`);
+  }
+
+  let result = await generateAndScore(userPrompt, images);
 
   if (result.skip) {
     return {
@@ -378,7 +475,7 @@ export async function generateArticle(
   let revised = false;
   if (result.scoreInfo.total < SCORE_THRESHOLD) {
     console.log(`  スコアが${SCORE_THRESHOLD}点未満のため、修正を実行します。`);
-    result = await reviseArticle(userPrompt, result);
+    result = await reviseArticle(userPrompt, result, images);
     revised = true;
     console.log(`  修正後の採点結果: ${result.scoreInfo.total}点/100点`);
   }
