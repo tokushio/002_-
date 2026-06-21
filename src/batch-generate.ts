@@ -21,6 +21,7 @@ import {
   toGeneratedArticle,
   fetchImageBlocks,
   imageUrlsForPost,
+  shouldUseVision,
   type ArticleWithScore,
 } from "./claude.js";
 import { runBatch, type BatchRequest } from "./batch.js";
@@ -87,7 +88,9 @@ async function collectCandidates(): Promise<Candidate[]> {
         console.log(`  スキップ[${f.reason}]: ${url}`);
         continue;
       }
-      const images = await fetchImageBlocks(imageUrlsForPost(post));
+      const images = shouldUseVision(post.caption?.text)
+        ? await fetchImageBlocks(imageUrlsForPost(post))
+        : [];
       candidates.push({
         code: post.code,
         url,

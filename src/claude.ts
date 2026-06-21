@@ -334,6 +334,29 @@ const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/we
  * カルーセル画像URLをサーバー側でfetchしてbase64の画像ブロックに変換する。
  * 取得失敗した画像はスキップする。最大 MAX_VISION_IMAGES 枚。
  */
+/**
+ * この投稿で画像(vision)を使うべきか判定する。コスト最適化(③)。
+ * VISION_MODE: always(既定・現状維持) | never | conditional
+ * conditional は「キャプション単体で内容が完結している投稿」のみ画像を省く。
+ * 例: 「10選」など番号付きで全項目がキャプションにある投稿 → 画像不要。
+ *     寸法をテロップでしか出さない投稿(キャプションが短く数値が無い) → 画像必要。
+ * 不確実な時は画像を送る(品質を優先)安全側の判定にする。
+ */
+export function shouldUseVision(caption: string | null | undefined): boolean {
+  const mode = process.env.VISION_MODE ?? "always";
+  if (mode === "never") return false;
+  if (mode !== "conditional") return true; // always(既定)
+
+  const text = (caption ?? "")
+    .replace(/[#＃][^\s#＃]+/g, "")
+    .replace(/@[^\s]+/g, "")
+    .trim();
+  const hasEnumeration = /(^|\n)\s*\d+[.．、)]/.test(text) || /\d+\s*選/.test(text);
+  const numberCount = (text.match(/\d+/g) ?? []).length;
+  const selfSufficient = text.length >= 250 && (hasEnumeration || numberCount >= 4);
+  return !selfSufficient;
+}
+
 /** 投稿のvision入力に使う画像URL一覧(カルーセル優先、無ければカバー1枚)。 */
 export function imageUrlsForPost(post: InstagramPost): string[] {
   return post.carouselUrls?.length
@@ -487,7 +510,10 @@ export async function generateArticle(
   const userPrompt = buildUserPrompt(post, comments);
 
   // カルーセル画像(最大6枚)をvision入力として取得。画像内の寸法・型番を読み取らせる。
-  const images = await fetchImageBlocks(imageUrlsForPost(post));
+  // VISION_MODE=conditional の場合、キャプションで完結する投稿は画像を省きコスト削減。
+  const images = shouldUseVision(post.caption?.text)
+    ? await fetchImageBlocks(imageUrlsForPost(post))
+    : [];
   if (images.length > 0) {
     console.log(`  画像 ${images.length} 枚をvision入力に追加`);
   }
