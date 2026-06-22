@@ -1,13 +1,14 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
+import type { Database } from "./database.types.js";
 
 const BUCKET = "article-images";
 
-let supabase: SupabaseClient | undefined;
+let supabase: SupabaseClient<Database> | undefined;
 
 /** Storageアップロード/upsertはRLSをバイパスするためservice_roleキーで接続する */
-function client(): SupabaseClient {
-  supabase ??= createClient(config.supabaseUrl, config.supabaseServiceKey);
+function client(): SupabaseClient<Database> {
+  supabase ??= createClient<Database>(config.supabaseUrl, config.supabaseServiceKey);
   return supabase;
 }
 

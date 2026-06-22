@@ -1,11 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
 import type { GeneratedArticle, InstagramPost, ScrapingRule } from "./types.js";
+import type { Database } from "./database.types.js";
 
-let supabase: SupabaseClient | undefined;
+// DB契約(database.types.ts=Supabase自動生成)で型付けし、列名ドリフトをコンパイル時に検出する。
+let supabase: SupabaseClient<Database> | undefined;
 
-function client(): SupabaseClient {
-  supabase ??= createClient(config.supabaseUrl, config.supabaseServiceKey);
+function client(): SupabaseClient<Database> {
+  supabase ??= createClient<Database>(config.supabaseUrl, config.supabaseServiceKey);
   return supabase;
 }
 
@@ -65,7 +67,8 @@ export async function saveArticle(
       thumbnail_url: thumbnailUrl,
       source_url: sourceUrl,
       source_tags: article.tags,
-      published_at: publishedAt,
+      // published_at は NOT NULL(default now)。null なら列を省略して既定値に任せる。
+      published_at: publishedAt ?? undefined,
       source_account: sourceAccount,
     })
     .select("id")
@@ -181,5 +184,5 @@ export async function fetchActiveScrapingRules(): Promise<ScrapingRule[]> {
     ];
   }
 
-  return data as ScrapingRule[];
+  return (data ?? []) as unknown as ScrapingRule[];
 }
