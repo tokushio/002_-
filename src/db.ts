@@ -70,6 +70,7 @@ export async function saveArticle(
       // published_at は NOT NULL(default now)。null なら列を省略して既定値に任せる。
       published_at: publishedAt ?? undefined,
       source_account: sourceAccount,
+      media_type: post.media_type,
     })
     .select("id")
     .single();
