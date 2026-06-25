@@ -1,0 +1,31 @@
+name: Generate Articles
+
+# 記事生成エンジンの定期実行。scraping_rules(is_active)テーブルの内容に従い、
+# 対象Instagramアカウントから記事を生成する。手動実行(workflow_dispatch)も可能。
+on:
+  schedule:
+    - cron: '0 0 * * *' # UTC 0:00 = JST 9:00 毎日
+  workflow_dispatch: {}
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npm run generate
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SOCIAVAULT_API_KEY: ${{ secrets.SOCIAVAULT_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          INSTAGRAM_HANDLE: ${{ secrets.INSTAGRAM_HANDLE }}
