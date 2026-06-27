@@ -632,9 +632,15 @@ export async function generateArticle(
   let revised = false;
   if (result.scoreInfo.total < SCORE_THRESHOLD) {
     console.log(`  スコアが${SCORE_THRESHOLD}点未満のため、修正を実行します。`);
-    result = await reviseArticle(userPrompt, result, images);
-    revised = true;
-    console.log(`  修正後の採点結果: ${result.scoreInfo.total}点/100点`);
+    try {
+      result = await reviseArticle(userPrompt, result, images);
+      revised = true;
+      console.log(`  修正後の採点結果: ${result.scoreInfo.total}点/100点`);
+    } catch (err) {
+      // Geminiの修正版出力がスキーマ不一致(scoreInfo欠落等)で落ちることがある。
+      // 記事を完全に失うより、修正前のdraft(採点済み)を維持して呼び出し元の判断に委ねる。
+      console.error(`  修正に失敗したため、修正前の記事を維持します: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   return toGeneratedArticle(result, revised ? beforeScore : undefined);

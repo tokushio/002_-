@@ -32,6 +32,24 @@ function client(): SupabaseClient<Database> {
  * 取得失敗・APIキー未設定時は post.display_uri にフォールバックする(index.ts側で解決)。
  */
 
+/**
+ * PostgRESTの一括insertはリクエストボディをPostgresのjson型へキャストしてから展開するため、
+ * 値にNUL文字等の制御文字が混ざっているとキャスト自体が失敗し
+ * 「invalid input syntax for type json」になる(2026-06-27 実機確認)。
+ * Geminiの生成テキストに稀に制御文字が紛れることがあるため、insert前に除去する。
+ */
+function sanitizeJsonText(value: string): string {
+  let result = "";
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    const isControl = code <= 0x1f || code === 0x7f;
+    if (!isControl) {
+      result += value[i];
+    }
+  }
+  return result;
+}
+
 /** 同じ投稿から既に記事が作られていないか source_url で確認 */
 export async function articleExists(sourceUrl: string): Promise<boolean> {
   const { data, error } = await client()
@@ -61,12 +79,12 @@ export async function saveArticle(
   const { data: inserted, error: articleError } = await client()
     .from("articles")
     .insert({
-      title: article.title,
-      intro: article.intro,
+      title: sanitizeJsonText(article.title),
+      intro: sanitizeJsonText(article.intro),
       category: article.category,
       thumbnail_url: thumbnailUrl,
       source_url: sourceUrl,
-      source_tags: article.tags,
+      source_tags: article.tags.map(sanitizeJsonText),
       // published_at は NOT NULL(default now)。null なら列を省略して既定値に任せる。
       published_at: publishedAt ?? undefined,
       source_account: sourceAccount,
@@ -81,7 +99,7 @@ export async function saveArticle(
   // 2. 本文セクションを article_parts に一括保存（material_id は廃止し null）
   const rows = article.parts.map((text, i) => ({
     article_id: inserted.id,
-    description: text,
+    description: sanitizeJsonText(text),
     sort_order: i + 1,
   }));
   const { error: partsError } = await client().from("article_parts").insert(rows);
@@ -98,12 +116,12 @@ export async function saveArticle(
   if (article.materials.length > 0) {
     const materialRows = article.materials.map((m) => ({
       article_id: inserted.id,
-      brand: m.maker ?? "",
-      product_name: m.product_name ?? "",
-      model_number: m.model_number ?? "",
+      brand: sanitizeJsonText(m.maker ?? ""),
+      product_name: sanitizeJsonText(m.product_name ?? ""),
+      model_number: sanitizeJsonText(m.model_number ?? ""),
       category: m.category ?? article.category,
       image_url: "",
-      caption: post.caption?.text?.slice(0, 500) ?? "",
+      caption: sanitizeJsonText(post.caption?.text?.slice(0, 500) ?? ""),
     }));
     const { error: matError } = await client().from("materials").insert(materialRows);
     if (matError) {
