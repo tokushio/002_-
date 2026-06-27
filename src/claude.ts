@@ -387,6 +387,127 @@ export async function fetchImageBlocks(urls: string[]): Promise<Anthropic.ImageB
   return blocks;
 }
 
+// ============================================================
+// 2026-06-27: 逐次生成パス(Gemini)。Batchパス(buildRequestBody/parseArticleMessage,
+// Anthropic)は上記のまま未移行のため、上の型・関数とは独立してここに追加する。
+// ============================================================
+
+export interface GeminiImagePart {
+  inline_data: { mime_type: string; data: string };
+}
+
+/** カルーセル画像URLをfetchしてGemini向けinline_dataパーツに変換する(画像取得失敗はスキップ)。 */
+export async function fetchGeminiImageParts(urls: string[]): Promise<GeminiImagePart[]> {
+  const blocks: GeminiImagePart[] = [];
+  for (const url of urls.slice(0, MAX_VISION_IMAGES)) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const rawType = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+      const mediaType = SUPPORTED_IMAGE_TYPES.includes(rawType) ? rawType : "image/jpeg";
+      const data = Buffer.from(await res.arrayBuffer()).toString("base64");
+      blocks.push({ inline_data: { mime_type: mediaType, data } });
+    } catch {
+      // 1枚の取得失敗は無視して続行
+    }
+  }
+  return blocks;
+}
+
+// ArticleSchemaと同じ構造をテキストで明示する(zodOutputFormatのGemini版相当が無いため、
+// プロンプトでJSON形状を指示し、受信後にArticleSchema.parse()で検証する)。
+const OUTPUT_SCHEMA_PROMPT = `
+
+---
+必ず次のJSON形式のみで出力してください(前置き・説明文・コードブロック記法は一切不要、生のJSONのみ):
+{
+  "skip": false,
+  "skipReason": "生成前チェックに該当する場合のみ理由を書く。該当しなければ空文字",
+  "title": "記事タイトル(30文字前後)",
+  "intro": "導入文(100〜150文字)",
+  "category": "ldk・washroom・toilet・exterior・layout・otherのいずれか1つ",
+  "tags": ["タグ1", "タグ2"],
+  "parts": ["パーツ1の複数行文字列(【小見出し】+「・」知識行)", "パーツ2の複数行文字列"],
+  "materials": [
+    { "maker": "メーカー名(無ければ空文字、推測しない)", "product_name": "商品名・アイテム名", "model_number": "型番(無ければ空文字、推測しない)", "category": "ldk・washroom・toilet・exterior・layout・otherのいずれか1つ" }
+  ],
+  "scoreInfo": {
+    "articleType": "記事タイプ(自由記述)",
+    "fixedScores": { "experience": 0, "specificity": 0, "cta": 0 },
+    "dynamicScores": [{ "axis": "動的評価軸名", "score": 0 }],
+    "total": 0,
+    "improvements": ["改善が必要な箇所の具体的な指摘"]
+  }
+}
+生成前チェックに1つでも該当する場合は skip:true, skipReason:"理由" とし、他のフィールドは空でよい。`;
+
+/**
+ * GEN_EFFORT(low/medium/high/max)をモデル世代に応じたthinkingConfigへ読み替える。
+ * gemini-2.x系は数値のthinkingBudget、gemini-3.x系は文字列のthinkingLevelを使う
+ * (2026-06-27実機検証: gemini-2.5-flashにthinkingLevelを渡すと400エラーになる)。
+ */
+function buildThinkingConfig(model: string): Record<string, unknown> {
+  const effort = (process.env.GEN_EFFORT ?? "").toLowerCase();
+  if (model.startsWith("gemini-2.")) {
+    const budget = effort === "low" ? 0 : effort === "high" || effort === "max" ? 16384 : 8192;
+    return { thinkingBudget: budget };
+  }
+  const level = effort === "low" ? "low" : effort === "high" || effort === "max" ? "high" : "medium";
+  return { thinkingLevel: level };
+}
+
+const GEMINI_MAX_OUTPUT_TOKENS = 32768; // thinkingトークンも同じ予算を消費するため十分大きく確保
+
+async function requestArticleViaGemini(
+  system: string,
+  userPrompt: string,
+  images: GeminiImagePart[] = [],
+): Promise<ArticleWithScore> {
+  const model = config.geminiModel;
+  const parts: Array<{ text: string } | GeminiImagePart> = [
+    { text: userPrompt + OUTPUT_SCHEMA_PROMPT },
+    ...images,
+  ];
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiApiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ parts }],
+        generationConfig: {
+          thinkingConfig: buildThinkingConfig(model),
+          maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+          responseMimeType: "application/json",
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Gemini APIエラー (${response.status}): ${errText.slice(0, 500)}`);
+  }
+
+  const data = await response.json();
+  if (process.env.LOG_USAGE === "true") {
+    console.error(`USAGE[${model}] ` + JSON.stringify(data.usageMetadata));
+  }
+  const candidate = data.candidates?.[0];
+  const raw: string = candidate?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? "";
+  if (!raw || (candidate?.finishReason && candidate.finishReason !== "STOP")) {
+    throw new Error(`記事の生成に失敗しました (finishReason: ${candidate?.finishReason ?? "不明"})`);
+  }
+
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("生成結果のJSON抽出に失敗しました");
+  }
+  return ArticleSchema.parse(JSON.parse(jsonMatch[0]));
+}
+
 export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[]): string {
   const commentLines = comments.map((c) => `- @${c.user.username}: ${c.text}`).join("\n");
 
@@ -440,31 +561,12 @@ export function parseArticleMessage(message: Anthropic.Message): ArticleWithScor
   return ArticleSchema.parse(JSON.parse(textBlock.text));
 }
 
-async function requestArticle(
-  system: string,
-  userPrompt: string,
-  images: Anthropic.ImageBlockParam[] = [],
-): Promise<ArticleWithScore> {
-  client ??= new Anthropic({ apiKey: config.anthropicApiKey });
-
-  const response = await client.messages.parse(buildRequestBody(system, userPrompt, images));
-
-  if (process.env.LOG_USAGE === "true") {
-    console.error(`USAGE[${config.genModel}] ` + JSON.stringify(response.usage));
-  }
-  const result = response.parsed_output;
-  if (!result) {
-    throw new Error(`記事の生成に失敗しました (stop_reason: ${response.stop_reason})`);
-  }
-  return result;
-}
-
-/** 1回目のAPI呼び出し: 記事生成 + 自己採点を同時に行う */
+/** 1回目のAPI呼び出し: 記事生成 + 自己採点を同時に行う(2026-06-27〜Gemini)。 */
 export async function generateAndScore(
   userPrompt: string,
-  images: Anthropic.ImageBlockParam[] = [],
+  images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
-  return requestArticle(SYSTEM_PROMPT, userPrompt, images);
+  return requestArticleViaGemini(SYSTEM_PROMPT, userPrompt, images);
 }
 
 /** 修正(2回目)用のユーザープロンプトを構築する(逐次/Batch共通)。 */
@@ -498,9 +600,9 @@ export function buildRevisionPrompt(userPrompt: string, draft: ArticleWithScore)
 async function reviseArticle(
   userPrompt: string,
   draft: ArticleWithScore,
-  images: Anthropic.ImageBlockParam[] = [],
+  images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
-  return requestArticle(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(userPrompt, draft), images);
+  return requestArticleViaGemini(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(userPrompt, draft), images);
 }
 
 export async function generateArticle(
@@ -512,7 +614,7 @@ export async function generateArticle(
   // カルーセル画像(最大6枚)をvision入力として取得。画像内の寸法・型番を読み取らせる。
   // VISION_MODE=conditional の場合、キャプションで完結する投稿は画像を省きコスト削減。
   const images = shouldUseVision(post.caption?.text)
-    ? await fetchImageBlocks(imageUrlsForPost(post))
+    ? await fetchGeminiImageParts(imageUrlsForPost(post))
     : [];
   if (images.length > 0) {
     console.log(`  画像 ${images.length} 枚をvision入力に追加`);
