@@ -465,34 +465,54 @@ export function parseArticleJsonText(raw: string): ArticleWithScore {
   return ArticleSchema.parse(JSON.parse(jsonMatch[0]));
 }
 
-async function requestArticleViaGemini(
+/**
+ * 2026-06-28: 逐次生成パスはOpenRouter(OpenAI互換chat completions)経由に変更。
+ * Google AI Studio無料枠のRPD上限(1日あたり約20回/モデル)を回避するため。
+ * モデル自体はvision対応のGeminiを継続使用(画像からの寸法・型番読み取りが必須のため)。
+ */
+async function requestArticleViaOpenRouter(
   system: string,
   userPrompt: string,
   images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
-  const model = config.geminiModel;
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiApiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildGeminiRequestBody(system, userPrompt, images)),
+  const model = config.openrouterModel;
+  const content: Array<Record<string, unknown>> = [
+    { type: "text", text: userPrompt + OUTPUT_SCHEMA_PROMPT },
+    ...images.map((img) => ({
+      type: "image_url",
+      image_url: { url: `data:${img.inline_data.mime_type};base64,${img.inline_data.data}` },
+    })),
+  ];
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.openrouterApiKey}`,
     },
-  );
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content },
+      ],
+      response_format: { type: "json_object" },
+    }),
+  });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Gemini APIエラー (${response.status}): ${errText.slice(0, 500)}`);
+    throw new Error(`OpenRouter APIエラー (${response.status}): ${errText.slice(0, 500)}`);
   }
 
   const data = await response.json();
   if (process.env.LOG_USAGE === "true") {
-    console.error(`USAGE[${model}] ` + JSON.stringify(data.usageMetadata));
+    console.error(`USAGE[${model}] ` + JSON.stringify(data.usage));
   }
-  const candidate = data.candidates?.[0];
-  const raw: string = candidate?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? "";
-  if (!raw || (candidate?.finishReason && candidate.finishReason !== "STOP")) {
-    throw new Error(`記事の生成に失敗しました (finishReason: ${candidate?.finishReason ?? "不明"})`);
+  const choice = data.choices?.[0];
+  const raw: string = choice?.message?.content ?? "";
+  if (!raw || (choice?.finish_reason && choice.finish_reason !== "stop")) {
+    throw new Error(`記事の生成に失敗しました (finish_reason: ${choice?.finish_reason ?? "不明"})`);
   }
   return parseArticleJsonText(raw);
 }
@@ -517,7 +537,7 @@ export async function generateAndScore(
   userPrompt: string,
   images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
-  return requestArticleViaGemini(SYSTEM_PROMPT, userPrompt, images);
+  return requestArticleViaOpenRouter(SYSTEM_PROMPT, userPrompt, images);
 }
 
 /** 修正(2回目)用のユーザープロンプトを構築する(逐次/Batch共通)。 */
@@ -553,7 +573,7 @@ async function reviseArticle(
   draft: ArticleWithScore,
   images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
-  return requestArticleViaGemini(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(userPrompt, draft), images);
+  return requestArticleViaOpenRouter(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(userPrompt, draft), images);
 }
 
 export async function generateArticle(

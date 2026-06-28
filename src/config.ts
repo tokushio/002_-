@@ -21,17 +21,29 @@ export const config = {
   get supabaseServiceKey() {
     return required("SUPABASE_SERVICE_KEY");
   },
-  /** 2026-06-27追加: Gemini(Google AI Studio)のAPIキー。逐次/Batch両パスで共通。 */
+  /** 2026-06-27追加: Gemini(Google AI Studio)のAPIキー。batch.ts(Batch API、現在休止中)専用。 */
   get geminiApiKey() {
     return required("GEMINI_API_KEY");
   },
   /**
-   * 記事生成に使うGeminiモデル(逐次/Batch共通、2026-06-28にBatchも統合)。
+   * 記事生成に使うGeminiモデル(batch.ts専用。逐次パスは2026-06-28にOpenRouter経由へ移行)。
    * 2026-06-27: gemini-3.5-flashが503(高負荷)で不安定だったため一時的にgemini-2.5-flashに変更。
    * 安定したら GEMINI_MODEL=gemini-3.5-flash で手動アップグレード可能。
    */
   get geminiModel() {
     return process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+  },
+  /**
+   * 2026-06-28追加: OpenRouter(https://openrouter.ai)のAPIキー。逐次生成パスのデフォルト経路。
+   * Google AI Studio無料枠のRPD(1日あたりリクエスト数)上限を回避するため、
+   * 同じGeminiモデルをOpenRouterの有料クレジット経由で呼ぶ(モデル自体はvisionありGeminiを継続使用)。
+   */
+  get openrouterApiKey() {
+    return required("OPENROUTER_API_KEY");
+  },
+  /** OpenRouter上のモデルID。"プロバイダー/モデル名"形式。 */
+  get openrouterModel() {
+    return process.env.OPENROUTER_MODEL ?? "google/gemini-2.5-flash";
   },
   get sociavaultApiKey() {
     return required("SOCIAVAULT_API_KEY");
