@@ -37,12 +37,16 @@ function client(): SupabaseClient<Database> {
  * 値にNUL文字等の制御文字が混ざっているとキャスト自体が失敗し
  * 「invalid input syntax for type json」になる(2026-06-27 実機確認)。
  * Geminiの生成テキストに稀に制御文字が紛れることがあるため、insert前に除去する。
+ * ただし\n(0x0A)/\r(0x0D)/\t(0x09)はparts内の「【見出し】+・行」の改行構造に必須のため、
+ * 除去対象から明示的に除外する(2026-06-28: 除去対象に含めてしまい記事本文の改行が
+ * 全て消える regression が発生したため修正)。
  */
 function sanitizeJsonText(value: string): string {
   let result = "";
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
-    const isControl = code <= 0x1f || code === 0x7f;
+    const isPreservedWhitespace = code === 0x0a || code === 0x0d || code === 0x09;
+    const isControl = !isPreservedWhitespace && (code <= 0x1f || code === 0x7f);
     if (!isControl) {
       result += value[i];
     }
