@@ -2,9 +2,13 @@ name: Generate Articles
 
 # 記事生成エンジンの定期実行。scraping_rules(is_active)テーブルの内容に従い、
 # 対象Instagramアカウントから記事を生成する。手動実行(workflow_dispatch)も可能。
+#
+# 実行頻度は3日に1回(2026-06-28変更、元は毎日)。対象アカウントの投稿頻度を実測した結果、
+# 最も頻繁なアカウントでも平均4日に1回程度の投稿で、毎日実行すると大半が新着0件の
+# 空振りでSociaVaultの課金(呼び出し回数ベース)だけが発生していたため。
 on:
   schedule:
-    - cron: '0 0 * * *' # UTC 0:00 = JST 9:00 毎日
+    - cron: '0 0 */3 * *' # UTC 0:00 = JST 9:00、3日に1回
   workflow_dispatch: {}
 
 jobs:
