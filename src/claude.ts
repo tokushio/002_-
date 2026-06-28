@@ -1,5 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { config } from "./config.js";
 import type { GeneratedArticle, InstagramComment, InstagramPost } from "./types.js";
@@ -322,18 +320,12 @@ export const REVISION_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
 記事の形式・スキーマは維持し、指摘された箇所を中心に改善してください。
 修正後の記事に対しても、同じ基準で自己評価(scoreInfo)を再度出力してください。`;
 
-let client: Anthropic | undefined;
-
-/** 記事生成時にClaudeへ渡すカルーセル画像の最大枚数(コスト対策) */
+/** 記事生成時にGeminiへ渡すカルーセル画像の最大枚数(コスト対策) */
 const MAX_VISION_IMAGES = 6;
 
-/** Claude vision が受け付ける画像MIMEタイプ */
+/** Gemini vision が受け付ける画像MIMEタイプ */
 const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
-/**
- * カルーセル画像URLをサーバー側でfetchしてbase64の画像ブロックに変換する。
- * 取得失敗した画像はスキップする。最大 MAX_VISION_IMAGES 枚。
- */
 /**
  * この投稿で画像(vision)を使うべきか判定する。コスト最適化(③)。
  * VISION_MODE: always(既定・現状維持) | never | conditional
@@ -366,30 +358,9 @@ export function imageUrlsForPost(post: InstagramPost): string[] {
       : [];
 }
 
-export async function fetchImageBlocks(urls: string[]): Promise<Anthropic.ImageBlockParam[]> {
-  const blocks: Anthropic.ImageBlockParam[] = [];
-  for (const url of urls.slice(0, MAX_VISION_IMAGES)) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const rawType = (res.headers.get("content-type") ?? "").split(";")[0].trim();
-      const mediaType = (SUPPORTED_IMAGE_TYPES.includes(rawType) ? rawType : "image/jpeg") as
-        | "image/jpeg"
-        | "image/png"
-        | "image/gif"
-        | "image/webp";
-      const data = Buffer.from(await res.arrayBuffer()).toString("base64");
-      blocks.push({ type: "image", source: { type: "base64", media_type: mediaType, data } });
-    } catch {
-      // 1枚の取得失敗は無視して続行
-    }
-  }
-  return blocks;
-}
-
 // ============================================================
-// 2026-06-27: 逐次生成パス(Gemini)。Batchパス(buildRequestBody/parseArticleMessage,
-// Anthropic)は上記のまま未移行のため、上の型・関数とは独立してここに追加する。
+// 2026-06-27: 逐次生成パス(Gemini)。2026-06-28にBatchパス(batch.ts/batch-generate.ts)も
+// Geminiへ移行し、Anthropic関連のコードは全て撤去した。
 // ============================================================
 
 export interface GeminiImagePart {
@@ -458,31 +429,54 @@ function buildThinkingConfig(model: string): Record<string, unknown> {
 
 const GEMINI_MAX_OUTPUT_TOKENS = 32768; // thinkingトークンも同じ予算を消費するため十分大きく確保
 
+/**
+ * generateContent(逐次)とbatchGenerateContent(Batch、batch.ts)の両方で使う
+ * リクエスト本体(systemInstruction/contents/generationConfig)を組み立てる。
+ * Batch APIの各リクエストは通常のGenerateContentRequestと同じ形なので、
+ * 逐次パスと完全に同じ組み立てロジックを共有できる。
+ */
+export function buildGeminiRequestBody(
+  system: string,
+  userPrompt: string,
+  images: GeminiImagePart[] = [],
+): Record<string, unknown> {
+  const model = config.geminiModel;
+  const parts: Array<{ text: string } | GeminiImagePart> = [
+    { text: userPrompt + OUTPUT_SCHEMA_PROMPT },
+    ...images,
+  ];
+  return {
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [{ parts }],
+    generationConfig: {
+      thinkingConfig: buildThinkingConfig(model),
+      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+      responseMimeType: "application/json",
+    },
+  };
+}
+
+/** Gemini応答の生テキストからArticleWithScoreを抽出・検証する(逐次/Batch共通)。 */
+export function parseArticleJsonText(raw: string): ArticleWithScore {
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("生成結果のJSON抽出に失敗しました");
+  }
+  return ArticleSchema.parse(JSON.parse(jsonMatch[0]));
+}
+
 async function requestArticleViaGemini(
   system: string,
   userPrompt: string,
   images: GeminiImagePart[] = [],
 ): Promise<ArticleWithScore> {
   const model = config.geminiModel;
-  const parts: Array<{ text: string } | GeminiImagePart> = [
-    { text: userPrompt + OUTPUT_SCHEMA_PROMPT },
-    ...images,
-  ];
-
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiApiKey}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ parts }],
-        generationConfig: {
-          thinkingConfig: buildThinkingConfig(model),
-          maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-          responseMimeType: "application/json",
-        },
-      }),
+      body: JSON.stringify(buildGeminiRequestBody(system, userPrompt, images)),
     },
   );
 
@@ -500,12 +494,7 @@ async function requestArticleViaGemini(
   if (!raw || (candidate?.finishReason && candidate.finishReason !== "STOP")) {
     throw new Error(`記事の生成に失敗しました (finishReason: ${candidate?.finishReason ?? "不明"})`);
   }
-
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error("生成結果のJSON抽出に失敗しました");
-  }
-  return ArticleSchema.parse(JSON.parse(jsonMatch[0]));
+  return parseArticleJsonText(raw);
 }
 
 export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[]): string {
@@ -521,44 +510,6 @@ export function buildUserPrompt(post: InstagramPost, comments: InstagramComment[
     "## 読者コメント",
     commentLines || "(コメントなし)",
   ].join("\n");
-}
-
-/**
- * messages.create / batches.create 共通のリクエスト本体を構築する。
- * 思考トークンは出力扱いで課金されコストを左右するため、モデルごとに最適化する:
- *  - Haiku系: adaptive非対応のため thinking 無効
- *  - Opus/Sonnet: adaptive。GEN_EFFORT(low/medium/high)で思考量=コストを調整可
- * これを逐次パス(requestArticle)とBatchパスの両方で使うことで挙動を一致させる。
- */
-export function buildRequestBody(
-  system: string,
-  userPrompt: string,
-  images: Anthropic.ImageBlockParam[] = [],
-): Anthropic.MessageCreateParamsNonStreaming {
-  const content: Anthropic.ContentBlockParam[] = [{ type: "text", text: userPrompt }, ...images];
-  const isHaiku = config.genModel.startsWith("claude-haiku");
-  const effort = !isHaiku && process.env.GEN_EFFORT ? process.env.GEN_EFFORT : undefined;
-
-  return {
-    model: config.genModel,
-    max_tokens: 16000,
-    thinking: isHaiku ? { type: "disabled" } : { type: "adaptive" },
-    system,
-    messages: [{ role: "user", content }],
-    output_config: {
-      format: zodOutputFormat(ArticleSchema),
-      ...(effort ? { effort: effort as "low" | "medium" | "high" | "max" } : {}),
-    },
-  } as Anthropic.MessageCreateParamsNonStreaming;
-}
-
-/** Batch結果の生メッセージから構造化記事(ArticleWithScore)を取り出す。 */
-export function parseArticleMessage(message: Anthropic.Message): ArticleWithScore {
-  const textBlock = message.content.find((b): b is Anthropic.TextBlock => b.type === "text");
-  if (!textBlock) {
-    throw new Error(`Batch結果にテキストブロックがありません (stop_reason: ${message.stop_reason})`);
-  }
-  return ArticleSchema.parse(JSON.parse(textBlock.text));
 }
 
 /** 1回目のAPI呼び出し: 記事生成 + 自己採点を同時に行う(2026-06-27〜Gemini)。 */

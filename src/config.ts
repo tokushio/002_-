@@ -21,25 +21,12 @@ export const config = {
   get supabaseServiceKey() {
     return required("SUPABASE_SERVICE_KEY");
   },
-  get anthropicApiKey() {
-    return required("ANTHROPIC_API_KEY");
-  },
-  /**
-   * 記事生成に使うClaudeモデル。既定は最高品質の claude-opus-4-8。
-   * コスト最適化の品質テスト用に GEN_MODEL で切替可能
-   * (例: claude-sonnet-4-6 / claude-haiku-4-5)。
-   * 2026-06-27: 逐次生成パス(claude.ts)はGeminiへ移行済み。このgenModelは
-   * Batchパス(batch.ts/batch-generate.ts、Anthropic未移行)でのみ使用。
-   */
-  get genModel() {
-    return process.env.GEN_MODEL ?? "claude-opus-4-8";
-  },
-  /** 2026-06-27追加: 逐次生成パスで使うGemini(Google AI Studio)のAPIキー。 */
+  /** 2026-06-27追加: Gemini(Google AI Studio)のAPIキー。逐次/Batch両パスで共通。 */
   get geminiApiKey() {
     return required("GEMINI_API_KEY");
   },
   /**
-   * 逐次生成パスで使うGeminiモデル。GEN_MODELとは独立(Batch移行後に統合予定)。
+   * 記事生成に使うGeminiモデル(逐次/Batch共通、2026-06-28にBatchも統合)。
    * 2026-06-27: gemini-3.5-flashが503(高負荷)で不安定だったため一時的にgemini-2.5-flashに変更。
    * 安定したら GEMINI_MODEL=gemini-3.5-flash で手動アップグレード可能。
    */

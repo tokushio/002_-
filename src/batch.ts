@@ -1,49 +1,101 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
+import { parseArticleJsonText, type ArticleWithScore } from "./claude.js";
 
-/** Batch APIに投げる1リクエスト(custom_idで結果を突き合わせる)。 */
+const BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+/** Gemini Batch APIに投げる1リクエスト(custom_idで結果を突き合わせる)。 */
 export interface BatchRequest {
   custom_id: string;
-  params: Anthropic.MessageCreateParamsNonStreaming;
+  /** buildGeminiRequestBody()が返すcontents/systemInstruction/generationConfig */
+  body: Record<string, unknown>;
 }
 
-let client: Anthropic | undefined;
-function getClient(): Anthropic {
-  client ??= new Anthropic({ apiKey: config.anthropicApiKey });
-  return client;
+async function batchFetch(path: string, init: RequestInit = {}): Promise<any> {
+  const res = await fetch(`${BASE_URL}/${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": config.geminiApiKey,
+      ...(init.headers ?? {}),
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gemini Batch APIエラー (${res.status}) ${path}: ${text.slice(0, 500)}`);
+  }
+  return res.json();
 }
+
+const TERMINAL_STATES = new Set([
+  "JOB_STATE_SUCCEEDED",
+  "JOB_STATE_FAILED",
+  "JOB_STATE_CANCELLED",
+  "JOB_STATE_EXPIRED",
+]);
 
 /**
- * Message Batches APIにまとめて投げ、完了までポーリングして
- * custom_id -> 成功メッセージ のMapを返す(全トークン50%オフ)。
+ * Gemini Batch API(batchGenerateContent)にまとめて投げ、完了までポーリングして
+ * custom_id -> ArticleWithScore のMapを返す(全トークン50%オフ・24時間以内に完了)。
  * 失敗/期限切れの結果はログに出してMapに含めない。
  */
 export async function runBatch(
   requests: BatchRequest[],
   pollMs = 20000,
-): Promise<Map<string, Anthropic.Message>> {
-  const results = new Map<string, Anthropic.Message>();
+): Promise<Map<string, ArticleWithScore>> {
+  const results = new Map<string, ArticleWithScore>();
   if (requests.length === 0) return results;
 
-  const batch = await getClient().messages.batches.create({ requests });
-  console.log(`バッチ送信: ${batch.id} (${requests.length}件) — 完了までポーリングします`);
+  const model = config.geminiModel;
+  const created = await batchFetch(`models/${model}:batchGenerateContent`, {
+    method: "POST",
+    body: JSON.stringify({
+      batch: {
+        display_name: `article-batch-${Date.now()}`,
+        input_config: {
+          requests: {
+            requests: requests.map((r) => ({ request: r.body, metadata: { key: r.custom_id } })),
+          },
+        },
+      },
+    }),
+  });
 
-  let status = batch;
-  while (status.processing_status !== "ended") {
+  const batchName: string = created.name;
+  console.log(`バッチ送信: ${batchName} (${requests.length}件) — 完了までポーリングします`);
+
+  let status = created;
+  let state: string = status.metadata?.state ?? "JOB_STATE_PENDING";
+  while (!TERMINAL_STATES.has(state)) {
     await new Promise((r) => setTimeout(r, pollMs));
-    status = await getClient().messages.batches.retrieve(batch.id);
-    const c = status.request_counts;
-    process.stdout.write(
-      `\r  状態: ${status.processing_status} | 完了 ${c.succeeded} / 失敗 ${c.errored} / 処理中 ${c.processing}   `,
-    );
+    status = await batchFetch(batchName);
+    state = status.metadata?.state ?? state;
+    process.stdout.write(`\r  状態: ${state}   `);
   }
   process.stdout.write("\n");
 
-  for await (const r of await getClient().messages.batches.results(batch.id)) {
-    if (r.result.type === "succeeded") {
-      results.set(r.custom_id, r.result.message);
-    } else {
-      console.error(`  ✗ ${r.custom_id}: ${r.result.type}`);
+  if (state !== "JOB_STATE_SUCCEEDED") {
+    console.error(`  バッチが${state}で終了しました`);
+    return results;
+  }
+
+  const inlined: any[] = status.response?.inlinedResponses ?? [];
+  for (const item of inlined) {
+    const key: string | undefined = item.metadata?.key;
+    if (!key) continue;
+    if (item.error) {
+      console.error(`  ✗ ${key}: ${item.error.message ?? JSON.stringify(item.error)}`);
+      continue;
+    }
+    const candidate = item.response?.candidates?.[0];
+    const raw: string = candidate?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? "";
+    if (!raw) {
+      console.error(`  ✗ ${key}: 空レスポンス (finishReason: ${candidate?.finishReason ?? "不明"})`);
+      continue;
+    }
+    try {
+      results.set(key, parseArticleJsonText(raw));
+    } catch (e) {
+      console.error(`  ✗ ${key} パース失敗: ${e instanceof Error ? e.message : e}`);
     }
   }
   return results;

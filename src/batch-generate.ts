@@ -15,22 +15,21 @@ import {
   REVISION_SYSTEM_PROMPT,
   SCORE_THRESHOLD,
   buildUserPrompt,
-  buildRequestBody,
+  buildGeminiRequestBody,
   buildRevisionPrompt,
-  parseArticleMessage,
   toGeneratedArticle,
-  fetchImageBlocks,
+  fetchGeminiImageParts,
   imageUrlsForPost,
   shouldUseVision,
+  type GeminiImagePart,
   type ArticleWithScore,
 } from "./claude.js";
 import { runBatch, type BatchRequest } from "./batch.js";
 import type { InstagramPost, ScrapingRule } from "./types.js";
-import type Anthropic from "@anthropic-ai/sdk";
 
 /**
  * Batches版の記事生成。逐次版(index.ts)と同じフィルタ/保存ロジックを使いつつ、
- * Claude呼び出しだけをまとめてMessage Batches API(全トークン50%オフ・非同期)に投げる。
+ * Gemini呼び出しだけをまとめてBatch API(全トークン50%オフ・非同期、24時間以内完了)に投げる。
  * 逐次版は壊さず、こちらは `npm run generate:batch` で起動する追加パス。
  */
 
@@ -42,7 +41,7 @@ interface Candidate {
   handle: string;
   post: InstagramPost;
   userPrompt: string;
-  images: Anthropic.ImageBlockParam[];
+  images: GeminiImagePart[];
 }
 
 /** index.tsと同等の足切り判定(コメントはBatch版では入力に含めない=API節約)。 */
@@ -89,7 +88,7 @@ async function collectCandidates(): Promise<Candidate[]> {
         continue;
       }
       const images = shouldUseVision(post.caption?.text)
-        ? await fetchImageBlocks(imageUrlsForPost(post))
+        ? await fetchGeminiImageParts(imageUrlsForPost(post))
         : [];
       candidates.push({
         code: post.code,
@@ -112,26 +111,19 @@ async function main() {
   }
   console.log(`\n候補 ${candidates.length}件 をBatchで生成します。`);
 
-  // ── Batch 1: 生成 ──
+  // ── Batch 1: 生成 ── (runBatchが応答のパース・検証まで行いArticleWithScoreを返す)
   const genRequests: BatchRequest[] = candidates.map((c) => ({
     custom_id: c.code,
-    params: buildRequestBody(SYSTEM_PROMPT, c.userPrompt, c.images),
+    body: buildGeminiRequestBody(SYSTEM_PROMPT, c.userPrompt, c.images),
   }));
   const genResults = await runBatch(genRequests);
 
-  // 結果をパースし、低スコアは修正バッチへ
+  // 低スコアは修正バッチへ
   const drafts = new Map<string, ArticleWithScore>();
   const reviseRequests: BatchRequest[] = [];
   for (const c of candidates) {
-    const msg = genResults.get(c.code);
-    if (!msg) continue;
-    let art: ArticleWithScore;
-    try {
-      art = parseArticleMessage(msg);
-    } catch (e) {
-      console.error(`  パース失敗 ${c.code}: ${e instanceof Error ? e.message : e}`);
-      continue;
-    }
+    const art = genResults.get(c.code);
+    if (!art) continue;
     if (art.skip || art.scoreInfo.total === 0) {
       console.log(`  スキップ[生成前チェック] ${c.code}: ${art.skipReason ?? ""}`);
       continue;
@@ -140,7 +132,7 @@ async function main() {
     if (art.scoreInfo.total < SCORE_THRESHOLD) {
       reviseRequests.push({
         custom_id: c.code,
-        params: buildRequestBody(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(c.userPrompt, art), c.images),
+        body: buildGeminiRequestBody(REVISION_SYSTEM_PROMPT, buildRevisionPrompt(c.userPrompt, art), c.images),
       });
     }
   }
@@ -149,12 +141,8 @@ async function main() {
   if (reviseRequests.length > 0) {
     console.log(`\n${reviseRequests.length}件を修正バッチで再生成します。`);
     const revResults = await runBatch(reviseRequests);
-    for (const [code, msg] of revResults) {
-      try {
-        drafts.set(code, parseArticleMessage(msg));
-      } catch (e) {
-        console.error(`  修正パース失敗 ${code}: ${e instanceof Error ? e.message : e}`);
-      }
+    for (const [code, art] of revResults) {
+      drafts.set(code, art);
     }
   }
 
